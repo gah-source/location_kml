@@ -1,0 +1,482 @@
+import streamlit as st
+import pandas as pd
+import simplekml
+import tempfile
+import os
+from io import StringIO
+import base64
+import html
+
+def normalizar_nombre_columna(nombre_columna):
+    """
+    Normaliza nombres de columnas para hacer coincidencias flexibles
+    """
+    nombre = str(nombre_columna).lower().strip()
+    
+    # Mapeo de nombres equivalentes
+    mapeo = {
+        # Nombre
+        'nombre': 'nombre',
+        'name': 'nombre',
+        'nombres': 'nombre',
+        'names': 'nombre',
+        'punto': 'nombre',
+        'point': 'nombre',
+        'label': 'nombre',
+        'etiqueta': 'nombre',
+        
+        # Latitud
+        'latitud': 'latitud', 
+        'latitude': 'latitud',
+        'lat': 'latitud',
+        'latitudine': 'latitud',
+        
+        # Longitud
+        'longitud': 'longitud',
+        'longitude': 'longitud',
+        'lon': 'longitud',
+        'lng': 'longitud',
+        'long': 'longitud',
+        
+        # Folder
+        'folder': 'folder',
+        'carpeta': 'folder',
+        'categoría': 'folder',
+        'categoria': 'folder',
+        'category': 'folder',
+        'categorie': 'folder',
+        
+        # Descripción
+        'descripcion': 'descripcion',
+        'description': 'descripcion',
+        'descripción': 'descripcion',
+        'desc': 'descripcion',
+        'detail': 'descripcion',
+        'detalle': 'descripcion',
+        
+        # Color
+        'color': 'color',
+        'colour': 'color',
+        'colore': 'color',
+        'colorhex': 'color',
+        'hexcolor': 'color',
+        
+        # Icono
+        'icono': 'icono',
+        'icon': 'icono',
+        'icone': 'icono',
+        'symbol': 'icono',
+        'simbolo': 'icono',
+        'símbolo': 'icono',
+        'marker': 'icono'
+    }
+    
+    return mapeo.get(nombre, nombre)
+
+def encontrar_columnas(df):
+    """
+    Encuentra las columnas relevantes en el DataFrame
+    """
+    columnas_normalizadas = {normalizar_nombre_columna(col): col for col in df.columns}
+    
+    columnas_encontradas = {}
+    
+    # Buscar columnas requeridas
+    for col_requerida in ['nombre', 'latitud', 'longitud']:
+        if col_requerida in columnas_normalizadas:
+            columnas_encontradas[col_requerida] = columnas_normalizadas[col_requerida]
+        else:
+            return None, f"No se encontró la columna: {col_requerida}"
+    
+    # Buscar columnas opcionales (incluyendo color y folder para funcionalidad)
+    for col_opcional in ['folder', 'descripcion', 'color', 'icono']:
+        if col_opcional in columnas_normalizadas:
+            columnas_encontradas[col_opcional] = columnas_normalizadas[col_opcional]
+    
+    return columnas_encontradas, None
+
+def crear_descripcion_html(fila, todas_las_columnas, columnas_mapeadas):
+    """
+    Crea una descripción HTML con todas las columnas del CSV EXCEPTO color y folder
+    """
+    html_parts = ["<div style='font-family: Arial, sans-serif; max-width: 400px;'>"]
+    
+    # Agregar nombre como título
+    nombre_col = columnas_mapeadas['nombre']
+    if not pd.isna(fila.get(nombre_col)):
+        html_parts.append(f"<h3 style='color: #1f77b4; margin-bottom: 10px;'>{html.escape(str(fila[nombre_col]))}</h3>")
+    
+    html_parts.append("<table style='width: 100%; border-collapse: collapse;'>")
+    
+    # Columnas a excluir del popup (color y folder)
+    columnas_excluidas_popup = []
+    
+    # Agregar columnas de color y folder a las excluidas SOLO para el popup
+    if 'color' in columnas_mapeadas:
+        columnas_excluidas_popup.append(columnas_mapeadas['color'])
+    if 'folder' in columnas_mapeadas:
+        columnas_excluidas_popup.append(columnas_mapeadas['folder'])
+    
+    for col_original in todas_las_columnas:
+        # Excluir columnas técnicas del popup
+        if (col_original not in columnas_excluidas_popup and 
+            not pd.isna(fila.get(col_original))):
+            valor = fila[col_original]
+            if pd.notna(valor) and str(valor).strip() != '':
+                # Escapar el HTML para seguridad
+                valor_escapeado = html.escape(str(valor))
+                
+                html_parts.append(f"""
+                <tr>
+                    <td style='padding: 4px 8px; border-bottom: 1px solid #ddd; font-weight: bold; vertical-align: top; width: 30%;'>
+                        {html.escape(col_original)}:
+                    </td>
+                    <td style='padding: 4px 8px; border-bottom: 1px solid #ddd; vertical-align: top; width: 70%;'>
+                        {valor_escapeado}
+                    </td>
+                </tr>
+                """)
+    
+    # Agregar coordenadas al final con el formato solicitado
+    lat_col = columnas_mapeadas['latitud']
+    lon_col = columnas_mapeadas['longitud']
+    if not pd.isna(fila.get(lat_col)) and not pd.isna(fila.get(lon_col)):
+        try:
+            latitud = float(fila[lat_col])
+            longitud = float(fila[lon_col])
+            coordenadas_formateadas = f"{latitud:.6f}, {longitud:.6f}"
+            
+            html_parts.append(f"""
+            <tr>
+                <td style='padding: 4px 8px; border-bottom: 1px solid #ddd; font-weight: bold; vertical-align: top;'>
+                    Coordenadas:
+                </td>
+                <td style='padding: 4px 8px; border-bottom: 1px solid #ddd; vertical-align: top;'>
+                    {coordenadas_formateadas}
+                </td>
+            </tr>
+            """)
+        except ValueError:
+            # En caso de error en las coordenadas, mostrar el valor original
+            html_parts.append(f"""
+            <tr>
+                <td style='padding: 4px 8px; border-bottom: 1px solid #ddd; font-weight: bold; vertical-align: top;'>
+                    Coordenadas:
+                </td>
+                <td style='padding: 4px 8px; border-bottom: 1px solid #ddd; vertical-align: top;'>
+                    {fila[lat_col]}, {fila[lon_col]}
+                </td>
+            </tr>
+            """)
+    
+    html_parts.append("</table>")
+    html_parts.append("</div>")
+    
+    return "".join(html_parts)
+
+def crear_kml_desde_dataframe(df, archivo_kml):
+    """
+    Crea un KML desde un DataFrame con nombres de columnas flexibles
+    """
+    kml = simplekml.Kml()
+    folders = {}
+    
+    # Encontrar columnas
+    columnas, error = encontrar_columnas(df)
+    if error:
+        return 0, 0, error
+    
+    puntos_procesados = 0
+    errores = 0
+    
+    # Obtener todas las columnas originales para mostrar en el popup
+    todas_las_columnas = df.columns.tolist()
+    
+    for index, fila in df.iterrows():
+        try:
+            # Obtener datos usando nombres normalizados
+            nombre_col = columnas['nombre']
+            lat_col = columnas['latitud']
+            lon_col = columnas['longitud']
+            
+            # Verificar datos requeridos
+            if pd.isna(fila.get(nombre_col)) or pd.isna(fila.get(lat_col)) or pd.isna(fila.get(lon_col)):
+                st.warning(f"Fila {index+1}: Faltan datos requeridos")
+                errores += 1
+                continue
+            
+            # Obtener valores
+            nombre = str(fila[nombre_col]).strip()
+            try:
+                latitud = float(fila[lat_col])
+                longitud = float(fila[lon_col])
+            except ValueError:
+                st.warning(f"Fila {index+1}: Coordenadas inválidas")
+                errores += 1
+                continue
+            
+            # Obtener folder (para estructura de folders)
+            estructura_folder = ""
+            if 'folder' in columnas and not pd.isna(fila.get(columnas['folder'])):
+                estructura_folder = str(fila[columnas['folder']]).strip()
+            
+            # Obtener color (para estilo de íconos)
+            color = 'ff0000ff'  # Azul por defecto
+            if 'color' in columnas and not pd.isna(fila.get(columnas['color'])):
+                color_valor = str(fila[columnas['color']])
+                if color_valor and color_valor.strip() != '':
+                    color = color_valor.strip()
+                    if color.startswith('#'):
+                        color = color[1:]
+            
+            # Obtener ícono
+            icono = 'http://maps.google.com/mapfiles/kml/pushpin/ylw-pushpin.png'
+            if 'icono' in columnas and not pd.isna(fila.get(columnas['icono'])):
+                icono_valor = str(fila[columnas['icono']])
+                if icono_valor and icono_valor.strip() != '':
+                    icono = icono_valor.strip()
+            
+            # DEBUG: Mostrar información de color
+            st.write(f"Punto {nombre}: color={color}, folder={estructura_folder}")
+            
+            # Procesar estructura de folders
+            partes_folder = [part.strip() for part in estructura_folder.split('/') if part.strip()] if estructura_folder else []
+            
+            # Crear estructura de folders anidados
+            folder_actual = kml
+            ruta_actual = []
+            
+            for parte in partes_folder:
+                ruta_actual.append(parte)
+                ruta_key = '/'.join(ruta_actual)
+                
+                if ruta_key not in folders:
+                    new_folder = folder_actual.newfolder(name=parte)
+                    folders[ruta_key] = new_folder
+                    new_folder.visibility = 0
+                
+                folder_actual = folders[ruta_key]
+            
+            # Crear el punto
+            if partes_folder:
+                punto = folder_actual.newpoint(name=nombre)
+            else:
+                punto = kml.newpoint(name=nombre)
+            
+            # Configurar coordenadas
+            punto.coords = [(longitud, latitud)]
+            
+            # Configurar estilo (usa color pero no lo muestra en popup)
+            punto.style.iconstyle.icon.href = icono
+            punto.style.iconstyle.color = color  # Esto SÍ aplica el color al ícono
+            punto.style.iconstyle.scale = 1.0
+            
+            # Crear descripción con TODAS las columnas EXCEPTO color y folder
+            descripcion_html = crear_descripcion_html(fila, todas_las_columnas, columnas)
+            punto.description = descripcion_html
+            
+            # Deseleccionar por defecto
+            punto.visibility = 0
+            
+            puntos_procesados += 1
+            
+        except Exception as e:
+            st.error(f"Error en fila {index+1}: {str(e)}")
+            errores += 1
+    
+    # Guardar archivo KML
+    kml.save(archivo_kml)
+    
+    return puntos_procesados, errores, None
+
+def get_download_link(file_path, filename):
+    """Genera un link de descarga para el archivo"""
+    with open(file_path, "rb") as f:
+        data = f.read()
+    b64 = base64.b64encode(data).decode()
+    href = f'<a href="data:file/kml;base64,{b64}" download="{filename}">Descargar {filename}</a>'
+    return href
+
+def main():
+    st.set_page_config(page_title="CSV a KML Converter", page_icon="🌍", layout="wide")
+    
+    st.title("🌍 Convertidor CSV a KML - Corregido")
+    st.markdown("**✅ CORREGIDO:** Estructura de folders y colores funcionan correctamente")
+    st.markdown("**✅ POPUP LIMPIO:** Sin columnas `color` y `folder`")
+    
+    # Sidebar con información
+    with st.sidebar:
+        st.header("📋 Funcionalidades Corregidas")
+        
+        st.subheader("✅ Ahora SÍ funciona:")
+        st.markdown("""
+        - **Estructura de folders** en panel lateral
+        - **Colores personalizados** en íconos
+        - **Popup limpio** sin columnas técnicas
+        """)
+        
+        st.subheader("🎨 Colores comunes")
+        colores = {
+            "Azul": "ff0000ff",
+            "Rojo": "ffff0000", 
+            "Verde": "ff00ff00",
+            "Amarillo": "ffffff00",
+            "Naranja": "ffffa500",
+            "Violeta": "ff800080"
+        }
+        
+        for nombre, codigo in colores.items():
+            st.code(f"{nombre}: {codigo}")
+    
+    # Sección de subida de archivo
+    st.header("📤 Subir archivo CSV")
+    
+    uploaded_file = st.file_uploader("Selecciona tu archivo CSV", type=['csv'])
+    
+    if uploaded_file is not None:
+        try:
+            # Leer el CSV
+            df = pd.read_csv(uploaded_file)
+            
+            # Mostrar vista previa
+            st.subheader("📊 Vista previa de los datos")
+            st.dataframe(df.head(10))
+            
+            # Identificar columnas
+            columnas_encontradas, error = encontrar_columnas(df)
+            
+            st.subheader("🔍 Columnas identificadas")
+            if columnas_encontradas:
+                # Mostrar mapeo de columnas
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Columnas requeridas:**")
+                    for col_norm, col_original in columnas_encontradas.items():
+                        if col_norm in ['nombre', 'latitud', 'longitud']:
+                            st.success(f"✅ `{col_original}` → **{col_norm}**")
+                
+                with col2:
+                    st.write("**Columnas para funcionalidad:**")
+                    for col_norm, col_original in columnas_encontradas.items():
+                        if col_norm in ['folder', 'color', 'icono']:
+                            st.info(f"⚙️ `{col_original}` → **{col_norm}**")
+                
+                # Mostrar qué se usará y qué no en el popup
+                st.subheader("🔄 Comportamiento del Popup")
+                
+                columnas_mostradas = [col for col in df.columns 
+                                    if col not in [columnas_encontradas.get('color', ''), 
+                                                  columnas_encontradas.get('folder', '')]]
+                
+                columnas_ocultas = []
+                if 'color' in columnas_encontradas:
+                    columnas_ocultas.append(columnas_encontradas['color'])
+                if 'folder' in columnas_encontradas:
+                    columnas_ocultas.append(columnas_encontradas['folder'])
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.success("**📋 En Popup:**")
+                    for col in columnas_mostradas:
+                        st.write(f"• {col}")
+                
+                with col2:
+                    st.error("**🚫 Ocultas (pero funcionales):**")
+                    for col in columnas_ocultas:
+                        st.write(f"• {col} → ⚙️ Usada para funcionalidad")
+                
+                # Procesar el archivo
+                if st.button("🔄 Generar KML", type="primary"):
+                    with st.spinner("Procesando datos y generando KML..."):
+                        # Crear archivo temporal
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.kml') as tmp_file:
+                            tmp_path = tmp_file.name
+                        
+                        # Generar KML
+                        puntos_procesados, errores, error_proceso = crear_kml_desde_dataframe(df, tmp_path)
+                        
+                        if error_proceso:
+                            st.error(f"Error al procesar: {error_proceso}")
+                        else:
+                            # Mostrar resultados
+                            st.subheader("📋 Resultados del procesamiento")
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.success(f"✅ Puntos procesados: {puntos_procesados}")
+                            with col2:
+                                if errores > 0:
+                                    st.error(f"❌ Errores: {errores}")
+                                else:
+                                    st.success("❌ Errores: 0")
+                            
+                            # Vista previa del popup
+                            with st.expander("👁️ Vista previa del Popup (SIN color y folder)"):
+                                if puntos_procesados > 0:
+                                    primera_fila = df.iloc[0]
+                                    descripcion_ejemplo = crear_descripcion_html(primera_fila, df.columns.tolist(), columnas_encontradas)
+                                    st.components.v1.html(descripcion_ejemplo, height=300, scrolling=True)
+                                else:
+                                    st.warning("No hay puntos procesados para mostrar vista previa")
+                            
+                            # Descargar archivo
+                            st.subheader("📥 Descargar archivo KML")
+                            
+                            nombre_original = uploaded_file.name.replace('.csv', '')
+                            nombre_kml = f"{nombre_original}_mapa.kml"
+                            
+                            # Mostrar link de descarga
+                            st.markdown(get_download_link(tmp_path, nombre_kml), unsafe_allow_html=True)
+                            
+                            # Información adicional
+                            with st.expander("ℹ️ Características del KML generado"):
+                                st.markdown("""
+                                **✅ INCLUIDO en el KML:**
+                                - Estructura completa de folders
+                                - Colores personalizados en íconos
+                                - Íconos personalizados
+                                - Todos los datos en popup (excepto color y folder)
+                                - Coordenadas formateadas: `21.147927, -101.680843`
+                                
+                                **🚫 OCULTO en popup (pero funcional):**
+                                - Columnas `color` y `folder`
+                                """)
+            
+            else:
+                st.error(f"❌ {error}")
+        
+        except Exception as e:
+            st.error(f"Error al procesar el archivo: {str(e)}")
+    
+    else:
+        # Mostrar ejemplo cuando no hay archivo subido
+        st.subheader("📝 Ejemplo de CSV funcionando")
+        
+        datos_ejemplo = {
+            'Folder': ['Ciudad/Monumentos', 'Ciudad/Parques', 'Restaurantes'],
+            'Name': ['Obelisco', 'Parque Central', 'Restaurante A'],
+            'Latitude': [21.147927, 21.148500, 21.149000],
+            'Longitude': [-101.680843, -101.681500, -101.682000],
+            'Color': ['ffff0000', 'ff00ff00', 'ff0000ff'],  # Rojo, Verde, Azul
+            'Description': ['Monumento icónico', 'Área verde', 'Lugar para comer'],
+            'Icon': [
+                'http://maps.google.com/mapfiles/kml/pushpin/red-pushpin.png',
+                'http://maps.google.com/mapfiles/kml/pushpin/grn-pushpin.png',
+                'http://maps.google.com/mapfiles/kml/pushpin/blue-pushpin.png'
+            ]
+        }
+        
+        df_ejemplo = pd.DataFrame(datos_ejemplo)
+        st.dataframe(df_ejemplo)
+        
+        st.info("""
+        **Resultado esperado en Google Earth:**
+        - **📁 Estructura:** Folders "Ciudad" → "Monumentos" y "Parques", y "Restaurantes"
+        - **🎨 Colores:** Íconos rojo, verde y azul respectivamente
+        - **📋 Popup:** Muestra Name, Description, Coordinates (SIN Folder y Color)
+        """)
+
+if __name__ == "__main__":
+    main()
